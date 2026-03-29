@@ -1,0 +1,381 @@
+﻿@page "/resultados-parametro"
+@using Demosuelos.Models
+@attribute [Authorize]
+@using System.Net.Http.Json
+@inject HttpClient Http
+
+<PageTitle>Resultados de Parámetro</PageTitle>
+
+<h3>Resultados de Parámetro</h3>
+
+@if (!string.IsNullOrWhiteSpace(mensajeError))
+{
+    <div class="alert alert-danger">@mensajeError</div>
+}
+
+@if (!string.IsNullOrWhiteSpace(mensajeOk))
+{
+    <div class="alert alert-success">@mensajeOk</div>
+}
+
+<EditForm Model="@modelo" OnValidSubmit="GuardarResultado">
+    <DataAnnotationsValidator />
+    <ValidationSummary />
+
+    <div class="mb-3">
+        <label class="form-label">Ensayo Realizado</label>
+        <select class="form-select" value="@ensayoSeleccionadoId" @onchange="OnEnsayoSeleccionadoChanged" disabled="@modoEdicion">
+            <option value="0">Seleccione un ensayo</option>
+            @foreach (var ensayo in ensayos)
+            {
+                <option value="@ensayo.Id">
+                    @($"{ensayo.Id} - {ensayo.Muestra?.CodigoMuestra} - {ensayo.TipoEnsayo?.Codigo}")
+                </option>
+            }
+        </select>
+
+        @if (modoEdicion)
+        {
+            <div class="form-text">
+                En edición no se puede cambiar el ensayo asociado al resultado.
+            </div>
+        }
+    </div>
+
+    <div class="mb-3">
+        <label class="form-label">Parámetro</label>
+        <InputSelect class="form-select"
+                     @bind-Value="modelo.ParametroEnsayoId"
+                     disabled="@(modoEdicion || ensayoSeleccionadoId == 0 || parametrosDisponibles.Count == 0)">
+            <option value="0">Seleccione un parámetro</option>
+            @foreach (var parametro in parametrosDisponibles)
+            {
+                <option value="@parametro.Id">
+                    @($"{parametro.Nombre}{(string.IsNullOrWhiteSpace(parametro.Unidad) ? "" : $" ({parametro.Unidad})")}")
+                </option>
+            }
+        </InputSelect>
+
+        @if (modoEdicion)
+        {
+            <div class="form-text">
+                En edición no se puede cambiar el parámetro asociado al resultado.
+            </div>
+        }
+        else if (ensayoSeleccionadoId > 0 && parametrosDisponibles.Count == 0)
+        {
+            <div class="form-text">
+                No hay parámetros manuales disponibles para este ensayo.
+            </div>
+        }
+    </div>
+
+    <div class="mb-3">
+        <label class="form-label">Valor</label>
+        <InputNumber class="form-control" @bind-Value="modelo.Valor" />
+    </div>
+
+    <div class="mb-3">
+        <label class="form-label">Observación</label>
+        <InputTextArea class="form-control" @bind-Value="modelo.Observacion" />
+    </div>
+
+    <button type="submit" class="btn btn-primary me-2" disabled="@guardando">
+        @(modoEdicion ? "Actualizar" : "Guardar")
+    </button>
+
+    <button type="button" class="btn btn-secondary" @onclick="LimpiarFormulario" disabled="@guardando">
+        Cancelar
+    </button>
+</EditForm>
+
+<hr />
+
+<h4>Listado</h4>
+
+@if (cargando)
+{
+    <p>Cargando...</p>
+}
+else if (resultados.Count == 0)
+{
+    <p>No hay resultados registrados.</p>
+}
+else
+{
+    <table class="table table-striped">
+        <thead>
+            <tr>
+                <th>Id</th>
+                <th>Ensayo</th>
+                <th>Muestra</th>
+                <th>Parámetro</th>
+                <th>Valor</th>
+                <th>Cumple Rango</th>
+                <th>Observación Técnica</th>
+                <th style="width:180px;">Acciones</th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var resultado in resultados)
+            {
+                <tr>
+                    <td>@resultado.Id</td>
+                    <td>@BuscarTextoEnsayo(resultado.EnsayoRealizadoId)</td>
+                    <td>@(resultado.EnsayoRealizado?.Muestra?.CodigoMuestra ?? "")</td>
+                    <td>@(resultado.ParametroEnsayo?.Nombre ?? "")</td>
+                    <td>@resultado.Valor</td>
+                    <td>
+                        @(resultado.CumpleRango.HasValue
+                            ? (resultado.CumpleRango.Value ? "Sí" : "No")
+                            : "N/A")
+                    </td>
+                    <td>@resultado.ObservacionTecnica</td>
+                    <td>
+                        <button type="button"
+                                class="btn btn-sm btn-warning me-2"
+                                @onclick="async () => await EditarResultado(resultado)">
+                            Editar
+                        </button>
+
+                        <button type="button"
+                                class="btn btn-sm btn-danger"
+                                @onclick="async () => await EliminarResultado(resultado.Id)">
+                            Eliminar
+                        </button>
+                    </td>
+                </tr>
+            }
+        </tbody>
+    </table>
+}
+
+@code {
+    private ResultadoParametro modelo = new();
+
+    private List<ResultadoParametro> resultados = new();
+    private List<EnsayoRealizado> ensayos = new();
+    private List<ParametroEnsayo> parametrosDisponibles = new();
+
+    private bool modoEdicion = false;
+    private bool cargando = false;
+    private bool guardando = false;
+
+    private string mensajeError = string.Empty;
+    private string mensajeOk = string.Empty;
+
+    private int ensayoSeleccionadoId = 0;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await CargarEnsayos();
+        await CargarResultados();
+    }
+
+    private async Task OnEnsayoSeleccionadoChanged(ChangeEventArgs e)
+    {
+        if (modoEdicion)
+            return;
+
+        if (!int.TryParse(e.Value?.ToString(), out var value))
+            value = 0;
+
+        ensayoSeleccionadoId = value;
+        modelo.EnsayoRealizadoId = value;
+        await CargarParametrosDisponibles(value);
+    }
+
+    private async Task CargarEnsayos()
+    {
+        try
+        {
+            ensayos = await Http.GetFromJsonAsync<List<EnsayoRealizado>>("api/ensayos") ?? new();
+        }
+        catch (Exception ex)
+        {
+            ensayos = new();
+            mensajeError = $"Error al cargar ensayos: {ex.Message}";
+        }
+    }
+
+    private async Task CargarResultados()
+    {
+        cargando = true;
+        mensajeError = string.Empty;
+
+        try
+        {
+            resultados = await Http.GetFromJsonAsync<List<ResultadoParametro>>("api/resultados") ?? new();
+        }
+        catch (Exception ex)
+        {
+            resultados = new();
+            mensajeError = $"Error al cargar resultados: {ex.Message}";
+        }
+        finally
+        {
+            cargando = false;
+        }
+    }
+
+    private async Task CargarParametrosDisponibles(int ensayoId)
+    {
+        mensajeError = string.Empty;
+
+        if (ensayoId <= 0)
+        {
+            parametrosDisponibles = new();
+            modelo.ParametroEnsayoId = 0;
+            return;
+        }
+
+        try
+        {
+            parametrosDisponibles = await Http.GetFromJsonAsync<List<ParametroEnsayo>>(
+                $"api/resultados/parametros-disponibles/{ensayoId}") ?? new();
+
+            if (!modoEdicion && !parametrosDisponibles.Any(x => x.Id == modelo.ParametroEnsayoId))
+            {
+                modelo.ParametroEnsayoId = 0;
+            }
+        }
+        catch (Exception ex)
+        {
+            parametrosDisponibles = new();
+
+            if (!modoEdicion)
+            {
+                modelo.ParametroEnsayoId = 0;
+            }
+
+            mensajeError = $"Error al cargar parámetros disponibles: {ex.Message}";
+        }
+    }
+
+    private async Task GuardarResultado()
+    {
+        guardando = true;
+        mensajeError = string.Empty;
+        mensajeOk = string.Empty;
+
+        try
+        {
+            if (modelo.EnsayoRealizadoId <= 0)
+            {
+                mensajeError = "Debes seleccionar un ensayo realizado.";
+                return;
+            }
+
+            if (modelo.ParametroEnsayoId <= 0)
+            {
+                mensajeError = "Debes seleccionar un parámetro.";
+                return;
+            }
+
+            HttpResponseMessage response;
+
+            if (modoEdicion)
+            {
+                response = await Http.PutAsJsonAsync($"api/resultados/{modelo.Id}", modelo);
+            }
+            else
+            {
+                response = await Http.PostAsJsonAsync("api/resultados", modelo);
+            }
+
+            if (response.IsSuccessStatusCode)
+            {
+                mensajeOk = modoEdicion
+                    ? "Resultado actualizado correctamente."
+                    : "Resultado guardado correctamente. Se recalculó validación técnica.";
+
+                LimpiarFormulario();
+                await CargarResultados();
+            }
+            else
+            {
+                var detalle = await response.Content.ReadAsStringAsync();
+                mensajeError = $"Error al guardar: {detalle}";
+            }
+        }
+        catch (Exception ex)
+        {
+            mensajeError = $"Error al guardar resultado: {ex.Message}";
+        }
+        finally
+        {
+            guardando = false;
+        }
+    }
+
+    private async Task EditarResultado(ResultadoParametro resultado)
+    {
+        mensajeError = string.Empty;
+        mensajeOk = string.Empty;
+
+        modelo = new ResultadoParametro
+        {
+            Id = resultado.Id,
+            EnsayoRealizadoId = resultado.EnsayoRealizadoId,
+            ParametroEnsayoId = resultado.ParametroEnsayoId,
+            Valor = resultado.Valor,
+            Observacion = resultado.Observacion
+        };
+
+        modoEdicion = true;
+        ensayoSeleccionadoId = resultado.EnsayoRealizadoId;
+        await CargarParametrosDisponibles(ensayoSeleccionadoId);
+    }
+
+    private async Task EliminarResultado(int id)
+    {
+        mensajeError = string.Empty;
+        mensajeOk = string.Empty;
+
+        try
+        {
+            var response = await Http.DeleteAsync($"api/resultados/{id}");
+
+            if (response.IsSuccessStatusCode)
+            {
+                if (modelo.Id == id)
+                {
+                    LimpiarFormulario();
+                }
+
+                mensajeOk = "Resultado eliminado correctamente. Se recalculó validación técnica.";
+                await CargarResultados();
+            }
+            else
+            {
+                var detalle = await response.Content.ReadAsStringAsync();
+                mensajeError = $"No se pudo eliminar: {detalle}";
+            }
+        }
+        catch (Exception ex)
+        {
+            mensajeError = $"Error al eliminar resultado: {ex.Message}";
+        }
+    }
+
+    private void LimpiarFormulario()
+    {
+        mensajeError = string.Empty;
+        mensajeOk = string.Empty;
+
+        modelo = new ResultadoParametro();
+        parametrosDisponibles = new();
+        ensayoSeleccionadoId = 0;
+        modoEdicion = false;
+    }
+
+    private string BuscarTextoEnsayo(int ensayoId)
+    {
+        var ensayo = ensayos.FirstOrDefault(x => x.Id == ensayoId);
+
+        if (ensayo is null)
+            return ensayoId.ToString();
+
+        return $"{ensayo.Id} - {ensayo.TipoEnsayo?.Codigo}";
+    }
+}
